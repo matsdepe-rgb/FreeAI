@@ -21,5 +21,5 @@ FreeAI is a modern, Gemini-inspired desktop application that wraps around a hidd
 2. Install the required Python dependencies:
    ```bash
    pip install customtkinter selenium
-
-   This app was vibecoded completely with Gemini so expect bugs.
+   ```bash
+This app was vibecoded completely with Gemini so expect bugs.
