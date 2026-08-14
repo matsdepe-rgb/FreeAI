@@ -8,7 +8,6 @@ import threading
 import uuid
 import http.server
 import socketserver
-import ctypes
 
 import customtkinter as ctk
 
@@ -18,6 +17,22 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+
+# Try importing multimedia libraries
+try:
+    import pygame
+    PYGAME_AVAILABLE = True
+except ImportError:
+    PYGAME_AVAILABLE = False
+    print("Warning: 'pygame' not found. Sound effects will be disabled. Run 'pip install pygame' to enable.")
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("Warning: 'pillow' not found. Custom visual themes will be disabled. Run 'pip install pillow' to enable.")
+
 
 # ==========================================
 # CUSTOMTKINTER THEME SETUP (Gemini Style)
@@ -46,7 +61,11 @@ def load_config():
     default_config = {
         "calibrated": False,
         "local_api_key": generate_api_key(),
-        "api_port": 5000
+        "api_port": 5000,
+        "ai_personality": "",
+        "about_user": "",
+        "visual_theme": "Default",
+        "sound_theme": "Default"
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -76,6 +95,113 @@ def save_history(history):
     with open(HISTORY_FILE, 'w') as f:
         json.dump(history, f, indent=4)
 
+
+# ==========================================
+# THEME & AUDIO MANAGEMENT
+# ==========================================
+def get_available_themes():
+    themes = ["Default"]
+    if os.path.exists("Themes"):
+        for name in os.listdir("Themes"):
+            if os.path.isdir(os.path.join("Themes", name)):
+                themes.append(name)
+    return themes
+
+def get_available_sfx():
+    sfx = ["Default"]
+    if os.path.exists("Sfx"):
+        for name in os.listdir("Sfx"):
+            if os.path.isdir(os.path.join("Sfx", name)):
+                sfx.append(name)
+    return sfx
+
+def get_theme_image_path(theme_name):
+    if theme_name == "Default": 
+        return None
+    path = os.path.join("Themes", theme_name)
+    if os.path.exists(path):
+        for file in os.listdir(path):
+            if file.lower().endswith((".png", ".jpg", ".jpeg")):
+                return os.path.join(path, file)
+    return None
+
+class AudioManager:
+    def __init__(self):
+        self.enabled = PYGAME_AVAILABLE
+        self.button_sound = None
+        self.typing_sounds = []
+        self.last_type_time = 0
+        self.type_index = 0
+        self.play_in_order = False
+        
+        if self.enabled:
+            try:
+                pygame.mixer.init()
+            except Exception as e:
+                print(f"Failed to initialize audio mixer: {e}")
+                self.enabled = False
+
+    def load_theme(self, theme_name):
+        self.button_sound = None
+        self.typing_sounds.clear()
+        self.type_index = 0
+        self.play_in_order = False
+        
+        if theme_name == "Default" or not self.enabled:
+            return
+            
+        btn_path = os.path.join("Sfx", theme_name, "Button.mp3")
+        if os.path.exists(btn_path):
+            try:
+                self.button_sound = pygame.mixer.Sound(btn_path)
+            except Exception:
+                pass
+                
+        type_dir = os.path.join("Sfx", theme_name, "Type")
+        if os.path.exists(type_dir):
+            files_in_dir = os.listdir(type_dir)
+            
+            # Check for the "inorder" flag file
+            if any(f.lower() in ["inorder", "inorder.txt"] for f in files_in_dir):
+                self.play_in_order = True
+
+            # Get sound files and sort them naturally (so 10.mp3 comes after 9.mp3)
+            sound_files = [f for f in files_in_dir if f.lower().endswith((".mp3", ".wav"))]
+            
+            def natural_sort_key(s):
+                return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+                
+            sound_files.sort(key=natural_sort_key)
+
+            for file in sound_files:
+                try:
+                    snd = pygame.mixer.Sound(os.path.join(type_dir, file))
+                    self.typing_sounds.append(snd)
+                except Exception:
+                    pass
+
+    def play_button(self):
+        if self.enabled and self.button_sound:
+            try:
+                self.button_sound.play()
+            except Exception:
+                pass
+
+    def play_type(self):
+        if self.enabled and self.typing_sounds:
+            now = time.time()
+            # Throttle to prevent severe overlapping lag
+            if now - self.last_type_time > 0.08:
+                try:
+                    if self.play_in_order:
+                        self.typing_sounds[self.type_index].play()
+                        self.type_index = (self.type_index + 1) % len(self.typing_sounds)
+                    else:
+                        random.choice(self.typing_sounds).play()
+                    self.last_type_time = now
+                except Exception:
+                    pass
+
 # ==========================================
 # SELENIUM BROWSER AUTOMATION
 # ==========================================
@@ -92,7 +218,6 @@ class ChatGPTBrowser:
         chrome_options = Options()
         chrome_options.add_argument("--remote-debugging-port=9222")
         chrome_options.add_argument("--start-maximized")
-        # Disable background throttling so Chrome continues rendering when not in focus
         chrome_options.add_argument("--disable-background-timer-throttling")
         chrome_options.add_argument("--disable-backgrounding-occluded-windows")
         chrome_options.add_argument("--disable-renderer-backgrounding")
@@ -121,7 +246,6 @@ class ChatGPTBrowser:
                 pass
 
     def minimize_to_background(self):
-        """Moves window off-screen instead of minimizing to avoid OS background throttling."""
         if self.driver:
             try:
                 self.driver.set_window_position(-32000, -32000)
@@ -184,7 +308,6 @@ class ChatGPTBrowser:
             responses = self.driver.find_elements(By.CSS_SELECTOR, "[data-message-author-role='assistant']")
             if responses:
                 latest = responses[-1]
-                # Filter specifically for inner text body to avoid grabbing UI text like "Bewerken"
                 inner_text_elements = latest.find_elements(By.CSS_SELECTOR, ".markdown, .prose, div[class*='markdown']")
                 if inner_text_elements:
                     return inner_text_elements[0].text
@@ -273,7 +396,7 @@ class ChatGPTBrowser:
 
 
 # ==========================================
-# LOCAL API SERVER HANDLER (Mimics OpenAI)
+# LOCAL API SERVER HANDLER
 # ==========================================
 class ChatAPIHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -360,15 +483,14 @@ class ModernChatApp(ctk.CTk):
         self.geometry("1200x800")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.configure(fg_color=BG_MAIN)
-
+        
         try:
-            # Forces Windows taskbar to recognize it separately from python.exe
+            import ctypes
             myappid = u'freeai.chat.gemini.1.0' 
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            
             self.iconbitmap("icon.ico")
-        except Exception as e:
-            print(f"Icon load error: {e}")
+        except Exception:
+            pass
 
         self.config_data = load_config()
         self.history = load_history()
@@ -376,10 +498,13 @@ class ModernChatApp(ctk.CTk):
         self.needs_context_injection = False
 
         self.browser = ChatGPTBrowser(self.update_status)
-        self.verification_code = ""
+        self.audio = AudioManager()
+        self.audio.load_theme(self.config_data.get("sound_theme", "Default"))
         
+        self.verification_code = ""
         self.history_buttons_pool = []
         self.current_bot_label = None
+        self.current_bg_image = None 
         
         self.browser_lock = threading.Lock()
         self.api_server = None
@@ -387,6 +512,7 @@ class ModernChatApp(ctk.CTk):
 
         self.setup_ui()
         self.update_history_sidebar()
+        self.apply_visual_theme()
 
     def setup_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -420,8 +546,11 @@ class ModernChatApp(ctk.CTk):
         self.setup_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
         self.setup_frame.grid(row=4, column=0, padx=10, pady=15, sticky="ew")
         
-        self.btn_api_config = ctk.CTkButton(self.setup_frame, text="⚙️ Local API Server", height=28, fg_color="#10a37f", hover_color="#1a7f64", font=ctk.CTkFont(size=12), command=self.open_api_config_modal)
-        self.btn_api_config.pack(fill="x", pady=(0, 15))
+        self.btn_api_config = ctk.CTkButton(self.setup_frame, text="🌐 Local API Server", height=28, fg_color="#10a37f", hover_color="#1a7f64", font=ctk.CTkFont(size=12), command=self.open_api_config_modal)
+        self.btn_api_config.pack(fill="x", pady=(0, 5))
+
+        self.btn_settings = ctk.CTkButton(self.setup_frame, text="⚙️ Settings & Themes", height=28, fg_color="#333537", hover_color="#444", font=ctk.CTkFont(size=12), command=self.open_settings_modal)
+        self.btn_settings.pack(fill="x", pady=(0, 15))
 
         self.lbl_status = ctk.CTkLabel(self.setup_frame, text="Status: Offline", text_color="#a8abae", font=ctk.CTkFont(size=11), anchor="w")
         self.lbl_status.pack(fill="x", pady=(0, 5))
@@ -443,6 +572,11 @@ class ModernChatApp(ctk.CTk):
         # ====================
         self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=BG_MAIN)
         self.main_frame.grid(row=0, column=1, sticky="nsew")
+        
+        self.bg_image_label = ctk.CTkLabel(self.main_frame, text="")
+        self.bg_image_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.bg_image_label.lower()
+
         self.main_frame.grid_rowconfigure(0, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
@@ -459,13 +593,98 @@ class ModernChatApp(ctk.CTk):
 
         self.chat_input = ctk.CTkTextbox(self.input_bg, height=50, fg_color="transparent", border_width=0, text_color=TEXT_MAIN, font=ctk.CTkFont(size=15))
         self.chat_input.grid(row=0, column=0, sticky="ew", padx=(20, 10), pady=10)
+        
+        self.chat_input.bind("<Key>", self.on_key_press)
         self.chat_input.bind("<Return>", self.on_enter_pressed)
 
         self.btn_send = ctk.CTkButton(self.input_bg, text="➤", width=40, height=40, corner_radius=20, fg_color="transparent", hover_color=HOVER_COLOR, text_color=TEXT_MAIN, font=ctk.CTkFont(size=20), state="disabled", command=self.send_message)
         self.btn_send.grid(row=0, column=1, padx=(0, 15))
 
+
+    # --- Theme Logic ---
+    def apply_visual_theme(self):
+        theme_name = self.config_data.get("visual_theme", "Default")
+        img_path = get_theme_image_path(theme_name)
+        
+        if PIL_AVAILABLE and img_path and os.path.exists(img_path):
+            try:
+                img = Image.open(img_path)
+                self.current_bg_image = ctk.CTkImage(light_image=img, dark_image=img, size=(1920, 1080))
+                self.bg_image_label.configure(image=self.current_bg_image)
+                self.main_frame.configure(fg_color="transparent")
+            except Exception as e:
+                print(f"Error loading background theme: {e}")
+                self.bg_image_label.configure(image="")
+                self.main_frame.configure(fg_color=BG_MAIN)
+        else:
+            self.bg_image_label.configure(image="")
+            self.main_frame.configure(fg_color=BG_MAIN)
+
+
+    # --- Settings Logic ---
+    def open_settings_modal(self):
+        self.audio.play_button()
+        modal = ctk.CTkToplevel(self)
+        modal.title("Settings, Themes & Profile")
+        modal.geometry("550x650")
+        modal.attributes("-topmost", True)
+        modal.transient(self)
+        modal.grab_set()
+
+        scroll_frame = ctk.CTkScrollableFrame(modal, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(scroll_frame, text="Customization & Themes", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(10, 10))
+        
+        # Visual Themes
+        av_themes = get_available_themes()
+        ctk.CTkLabel(scroll_frame, text="Visual Theme (Background):", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=20)
+        theme_menu = ctk.CTkOptionMenu(scroll_frame, values=av_themes)
+        theme_menu.pack(padx=20, pady=(5, 15), fill="x")
+        theme_menu.set(self.config_data.get("visual_theme", "Default"))
+
+        # Sound Themes
+        av_sfx = get_available_sfx()
+        ctk.CTkLabel(scroll_frame, text="Sound Theme (SFX):", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=20)
+        sfx_menu = ctk.CTkOptionMenu(scroll_frame, values=av_sfx)
+        sfx_menu.pack(padx=20, pady=(5, 15), fill="x")
+        sfx_menu.set(self.config_data.get("sound_theme", "Default"))
+
+        ctk.CTkLabel(scroll_frame, text="AI Profile & Personality", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 10))
+        
+        ctk.CTkLabel(scroll_frame, text="AI Personality / Style:", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=20)
+        ai_personality_box = ctk.CTkTextbox(scroll_frame, height=80)
+        ai_personality_box.pack(padx=20, pady=(5, 15), fill="x")
+        ai_personality_box.insert("1.0", self.config_data.get("ai_personality", ""))
+
+        ctk.CTkLabel(scroll_frame, text="What should the AI know about you?:", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=20)
+        about_user_box = ctk.CTkTextbox(scroll_frame, height=80)
+        about_user_box.pack(padx=20, pady=(5, 15), fill="x")
+        about_user_box.insert("1.0", self.config_data.get("about_user", ""))
+
+        def save_settings():
+            self.audio.play_button()
+            self.config_data["visual_theme"] = theme_menu.get()
+            self.config_data["sound_theme"] = sfx_menu.get()
+            self.config_data["ai_personality"] = ai_personality_box.get("1.0", "end").strip()
+            self.config_data["about_user"] = about_user_box.get("1.0", "end").strip()
+            save_config(self.config_data)
+            
+            # Apply instantly
+            self.apply_visual_theme()
+            self.audio.load_theme(self.config_data["sound_theme"])
+            
+            modal.destroy()
+
+        ctk.CTkButton(scroll_frame, text="Save Settings", command=save_settings, fg_color="#10a37f", hover_color="#1a7f64").pack(pady=20)
+
+        # Credits
+        credits_lbl = ctk.CTkLabel(scroll_frame, text="Created by matsdepe-rgb (GitHub)", text_color="gray", font=ctk.CTkFont(size=11, slant="italic"))
+        credits_lbl.pack(side="bottom", pady=15)
+
     # --- API Server Logic ---
     def open_api_config_modal(self):
+        self.audio.play_button()
         modal = ctk.CTkToplevel(self)
         modal.title("Local API Provider Settings")
         modal.geometry("500x350")
@@ -499,6 +718,7 @@ class ModernChatApp(ctk.CTk):
         status_lbl.pack(pady=(20, 5))
 
         def toggle_server():
+            self.audio.play_button()
             if self.api_server:
                 self.stop_api_server()
                 status_lbl.configure(text="Server is currently STOPPED", text_color="red")
@@ -598,6 +818,7 @@ class ModernChatApp(ctk.CTk):
                 self.history_buttons_pool.append(btn)
 
     def start_new_chat(self):
+        self.audio.play_button()
         self.current_chat_id = str(uuid.uuid4())
         self.history[self.current_chat_id] = {"title": "Nieuw gesprek", "messages": []}
         save_history(self.history)
@@ -606,6 +827,7 @@ class ModernChatApp(ctk.CTk):
         self.needs_context_injection = False
 
     def load_chat(self, chat_id):
+        self.audio.play_button()
         self.current_chat_id = chat_id
         chat_data = self.history[chat_id]
         self.clear_chat_display()
@@ -624,6 +846,15 @@ class ModernChatApp(ctk.CTk):
         if not self.current_chat_id or not self.history[self.current_chat_id]['messages']:
             return ""
         context_str = "[SYSTEM LOG: Context Restoration]\n"
+        
+        personality = self.config_data.get("ai_personality", "")
+        about_user = self.config_data.get("about_user", "")
+        if personality or about_user:
+            context_str += "--- PERSISTENT INSTRUCTIONS ---\n"
+            if personality: context_str += f"AI Personality: {personality}\n"
+            if about_user: context_str += f"About User: {about_user}\n"
+            context_str += "-------------------------------\n"
+
         for msg in self.history[self.current_chat_id]['messages']:
             role = "User" if msg['role'] == 'user' else "Assistant"
             context_str += f"{role}: {msg['content']}\n"
@@ -635,6 +866,7 @@ class ModernChatApp(ctk.CTk):
         self.lbl_status.configure(text=text)
 
     def toggle_browser_window(self):
+        self.audio.play_button()
         if not self.browser.driver:
             self.show_error("Error", "Launch and verify the browser first!")
             return
@@ -654,6 +886,7 @@ class ModernChatApp(ctk.CTk):
 
     # --- Automation Threads ---
     def launch_browser(self):
+        self.audio.play_button()
         self.btn_launch.configure(state="disabled")
         self.update_status("Starting Chrome...")
         threading.Thread(target=self._launch_browser_thread, daemon=True).start()
@@ -667,6 +900,7 @@ class ModernChatApp(ctk.CTk):
             self.btn_launch.configure(state="normal")
 
     def verify_connection(self):
+        self.audio.play_button()
         self.btn_verify.configure(state="disabled")
         self.verification_code = self.browser.generate_verification_code()
         
@@ -683,6 +917,7 @@ class ModernChatApp(ctk.CTk):
         code_lbl.pack(pady=10)
 
         def copy_to_clipboard():
+            self.audio.play_button()
             self.clipboard_clear()
             self.clipboard_append(self.verification_code)
             ver_win.update()
@@ -693,6 +928,7 @@ class ModernChatApp(ctk.CTk):
         copy_btn.pack(pady=5)
 
         def on_done():
+            self.audio.play_button()
             ver_win.grab_release()
             ver_win.destroy()
             self.update_status("Scanning for code...")
@@ -733,6 +969,7 @@ class ModernChatApp(ctk.CTk):
             btn_frame.pack(pady=10)
 
             def on_yes():
+                self.audio.play_button()
                 cal_win.destroy()
                 self.config_data["calibrated"] = True
                 save_config(self.config_data)
@@ -741,6 +978,7 @@ class ModernChatApp(ctk.CTk):
                 self.enable_chat()
 
             def on_no():
+                self.audio.play_button()
                 cal_win.destroy()
                 self.update_status("Calibration rejected.")
 
@@ -752,6 +990,7 @@ class ModernChatApp(ctk.CTk):
             self.update_status("Calibration failed.")
 
     def force_recalibrate(self):
+        self.audio.play_button()
         if not self.browser.driver:
             self.show_error("Error", "Launch and verify the browser first!")
             return
@@ -765,6 +1004,10 @@ class ModernChatApp(ctk.CTk):
             self.start_new_chat()
 
     # --- Messaging ---
+    def on_key_press(self, event):
+        if event.keysym != "Return" and event.char:
+            self.audio.play_type()
+
     def on_enter_pressed(self, event):
         if event.state & 0x0001:  # Shift + Enter for multiline
             return None
@@ -772,12 +1015,14 @@ class ModernChatApp(ctk.CTk):
         return "break"
 
     def send_message(self):
+        self.audio.play_button()
         text = self.chat_input.get("1.0", "end").strip()
         if not text:
             return
 
         self.chat_input.delete("1.0", "end")
         self.btn_send.configure(state="disabled")
+        
         self.append_user_bubble(text)
 
         if not self.current_chat_id:
@@ -795,13 +1040,30 @@ class ModernChatApp(ctk.CTk):
 
     def _send_thread(self, text):
         msg_to_send = text
-        if self.needs_context_injection:
+        
+        is_first_message = (len(self.history[self.current_chat_id]['messages']) == 1)
+        
+        if is_first_message:
+            personality = self.config_data.get("ai_personality", "")
+            about_user = self.config_data.get("about_user", "")
+            
+            if personality or about_user:
+                sys_prompt = "[SYSTEM INSTRUCTIONS]\n"
+                if personality:
+                    sys_prompt += f"AI Personality/Style: {personality}\n"
+                if about_user:
+                    sys_prompt += f"About the User: {about_user}\n"
+                sys_prompt += "[END SYSTEM INSTRUCTIONS. Acknowledge silently and apply to the following message:]\n\n"
+                msg_to_send = sys_prompt + text
+                
+        elif self.needs_context_injection:
             msg_to_send = self.build_compact_context() + text
             self.needs_context_injection = False
 
         self.after(0, self.prepare_bot_bubble)
 
         def stream_update(current_text):
+            self.audio.play_type()
             self.after(0, lambda: self.update_bot_bubble(current_text))
 
         with self.browser_lock:
