@@ -20,7 +20,7 @@ FreeAI is a modern, Gemini-inspired desktop application that wraps around a hidd
 1. Make sure you have **Python 3.10+** installed.
 2. Install the required Python dependencies:
    ```bash
-   pip install customtkinter selenium
+   pip install customtkinter selenium pygame pillow
    
 This app was vibecoded completely with Gemini so expect bugs.
 Also I would reccomend staying loggged out of ChatGPT so you dont get banned
