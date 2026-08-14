@@ -23,3 +23,4 @@ FreeAI is a modern, Gemini-inspired desktop application that wraps around a hidd
    pip install customtkinter selenium
    
 This app was vibecoded completely with Gemini so expect bugs.
+Also I would reccomend staying loggged out of ChatGPT so you dont get banned
